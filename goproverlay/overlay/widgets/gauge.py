@@ -602,6 +602,28 @@ class PowerGaugeWidget(Widget):
         vy = cy - (vb[3] - vb[1]) // 2
         draw.text((vx, vy), value_str, fill=self.theme["fg"], font=value_font)
 
+        # Over-threshold arc (if current power exceeds top zone bound)
+        top_bound = self.zone_bounds[-1]
+        if val > top_bound:
+            start_ang = self._angle_for_value(top_bound)
+            end_ang = self._angle_for_value(min(val, self.max_watts))
+            over_col = (180, 0, 255, 255)  # purple highlight for over FTP zones
+            draw.arc(bbox, start=start_ang, end=end_ang, fill=over_col, width=thickness)
+
+        # Position indicator tick: a radial line slightly wider than the donut at current angle
+        ang = self._angle_for_value(val)
+        arad = radians(ang)
+        ri = r - int(thickness * 0.65)
+        ro = r + int(thickness * 0.75)
+        ix0 = cx + int(ri * cos(arad))
+        iy0 = cy + int(ri * sin(arad))
+        ix1 = cx + int(ro * cos(arad))
+        iy1 = cy + int(ro * sin(arad))
+        tick_w = max(3, int(thickness * 0.35))
+        # White underlay for contrast, then accent on top
+        draw.line((ix0, iy0, ix1, iy1), fill=(255, 255, 255, 180), width=tick_w + 2)
+        draw.line((ix0, iy0, ix1, iy1), fill=self.theme.get("accent", (120, 200, 255, 255)), width=tick_w)
+
         # Lightning bolt icon centered above the value
         # Compute available vertical space above the value within inner circle
         top_inner = cy - fill_r
