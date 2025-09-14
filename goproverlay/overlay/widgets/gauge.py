@@ -23,6 +23,7 @@ Power gauge (full donut):
 from math import cos, sin, radians, atan2
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from bisect import bisect_left, bisect_right
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -465,6 +466,7 @@ class PowerGaugeWidget(Widget):
         theme: Dict,
         font_path: Optional[Path],
         zone_bounds: List[float],
+        avg_window_s: Optional[float] = None,
     ):
         super().__init__(box, theme)
         self.fit = fit_data
@@ -481,6 +483,8 @@ class PowerGaugeWidget(Widget):
             (max(fit_data.series.power.v) if fit_data.series.power else 300),
         )
         self._value_font_cached: Optional[ImageFont.FreeTypeFont] = None
+        self.avg_window_s = float(avg_window_s) if (avg_window_s or 0) > 0 else None
+        self._avg_font_cached: Optional[ImageFont.FreeTypeFont] = None
 
     def _angle_for_value(self, v: float) -> float:
         """Map watts to an angle on the full 360° ring.
@@ -563,8 +567,55 @@ class PowerGaugeWidget(Widget):
         if self._static is not None:
             panel.alpha_composite(self._static)
 
-        # Current value and zone center fill
-        val = self.fit.get_metric_value(Metric.power, t) or 0.0
+        # Current value (optionally averaged) and zone center fill
+        val: float
+        if (
+            self.avg_window_s is not None
+            and self.fit
+            and getattr(self.fit, "series", None)
+        ):
+            # Map video time to FIT time seconds if available
+            tv: Optional[float] = None
+            try:
+                # TimeSyncedFitData exposes a private helper; use if present
+                if hasattr(self.fit, "_to_fit_seconds"):
+                    tv = self.fit._to_fit_seconds(t)  # type: ignore[attr-defined]
+            except Exception:
+                tv = None
+            if tv is None:
+                tv = float(t)
+            s = self.fit.series
+            if s and s.power and s.power.t:
+                ts = s.power.t
+                vs = s.power.v
+                # Trailing average over [tv - window, tv]
+                left_t = tv - self.avg_window_s
+                i1 = bisect_right(ts, tv)
+                i0 = bisect_left(ts, left_t)
+                if 0 <= i0 < i1 and i1 <= len(ts):
+                    window_vals = vs[i0:i1]
+                    if window_vals:
+                        # Compute simple mean (values are floats already)
+                        acc = 0.0
+                        cnt = 0
+                        for x in window_vals:
+                            if x is not None:
+                                acc += float(x)
+                                cnt += 1
+                        if cnt > 0:
+                            val = acc / cnt
+                        else:
+                            val = float(
+                                self.fit.get_metric_value(Metric.power, t) or 0.0
+                            )
+                    else:
+                        val = float(self.fit.get_metric_value(Metric.power, t) or 0.0)
+                else:
+                    val = float(self.fit.get_metric_value(Metric.power, t) or 0.0)
+            else:
+                val = float(self.fit.get_metric_value(Metric.power, t) or 0.0)
+        else:
+            val = float(self.fit.get_metric_value(Metric.power, t) or 0.0)
         # Determine current zone index
         zone_idx = 0
         for i, ub in enumerate(self.zone_bounds):
@@ -622,7 +673,11 @@ class PowerGaugeWidget(Widget):
         tick_w = max(3, int(thickness * 0.35))
         # White underlay for contrast, then accent on top
         draw.line((ix0, iy0, ix1, iy1), fill=(255, 255, 255, 180), width=tick_w + 2)
-        draw.line((ix0, iy0, ix1, iy1), fill=self.theme.get("accent", (120, 200, 255, 255)), width=tick_w)
+        draw.line(
+            (ix0, iy0, ix1, iy1),
+            fill=self.theme.get("accent", (120, 200, 255, 255)),
+            width=tick_w,
+        )
 
         # Lightning bolt icon centered above the value
         # Compute available vertical space above the value within inner circle
@@ -655,5 +710,35 @@ class PowerGaugeWidget(Widget):
                 for (x, y) in bolt_units
             ]
             draw.polygon(poly_int, fill=self.theme.get("accent", (255, 255, 0, 230)))
+
+        # Optional averaging label below the value (centered, inside the circle) — drawn last
+        if self.avg_window_s is not None and self.avg_window_s > 0:
+            n_sec = int(round(self.avg_window_s))
+            label = f"{n_sec}s Avg"
+            if self._avg_font_cached is None:
+                # Fit within inner circle lower area
+                sample = "999s Avg"
+                self._avg_font_cached = _fit_font(
+                    draw,
+                    self.fm,
+                    sample,
+                    int(fill_r * 1.4),
+                    int(fill_r * 0.28),
+                    int(h * 0.16),
+                )
+            avg_font = self._avg_font_cached
+            lb = draw.textbbox((0, 0), label, font=avg_font)
+            lw, lh = (lb[2] - lb[0]), (lb[3] - lb[1])
+            margin = max(6, int(h * 0.01))
+            ly_top = vy + (vb[3] - vb[1]) + margin
+            ly_max = cy + fill_r - lh - margin
+            ly = min(ly_top, ly_max)
+            lx = cx - lw // 2
+            draw.text(
+                (lx, ly),
+                label,
+                fill=self.theme.get("muted", (200, 200, 200, 200)),
+                font=avg_font,
+            )
 
         return panel

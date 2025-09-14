@@ -53,6 +53,15 @@ def render(
     ftp: Optional[float] = typer.Option(
         None, help="Functional Threshold Power (W) for power zones"
     ),
+    power_avg: Optional[int] = typer.Option(
+        None,
+        "--power-avg",
+        "--power_avg",
+        help=(
+            "Windowed average (seconds) for power gauge. "
+            "Example: --power-avg 3 uses a 3s trailing average."
+        ),
+    ),
     power_zones: Optional[str] = typer.Option(
         None,
         help=(
@@ -84,32 +93,11 @@ def render(
     if output is None:
         output = video.with_name(f"{video.stem}_overlay.mp4")
 
-    # Determine wall-clock start for alignment
-    vid_start = None
+    # Load FIT without pre-alignment; the renderer will time-sync per frame
     if gpx is not None:
-        log.info("Using GPX to determine clip start/end...")
-        gpx_start, gpx_end = get_gpx_time_bounds(gpx)
-        if gpx_start is not None:
-            vid_start = gpx_start
-            log.info(
-                f"GPX start (UTC): {gpx_start.isoformat()} — end: {gpx_end.isoformat() if gpx_end else 'unknown'}"
-            )
-        else:
-            log.warning(
-                "Failed to extract timestamps from GPX; falling back to video metadata."
-            )
-    if vid_start is None:
-        log.info("Probing video metadata for start time...")
-        vid_start = get_video_start_utc(video)
-        if vid_start is None:
-            log.warning(
-                "Could not determine video start time; overlay will use FIT relative start."
-            )
-        else:
-            log.info(f"Video start (UTC): {vid_start.isoformat()}")
-
-    log.info("Loading FIT data and aligning...")
-    fit_data = FitData.from_fit_file(fit, align_to_datetime=vid_start)
+        log.info("GPX provided for fallback time sync: %s", str(gpx))
+    log.info("Loading FIT data (no pre-alignment)...")
+    fit_data = FitData.from_fit_file(fit, align_to_datetime=None)
     if fit_data.is_empty():
         typer.echo("No usable records found in FIT file.")
         raise typer.Exit(code=1)
@@ -153,6 +141,8 @@ def render(
         power_zones=zones_watts,
         ftp=ftp,
         speed_max_kmh=speed_max,
+        gpx_path=gpx,
+        power_avg_secs=float(power_avg) if power_avg is not None else None,
     )
     renderer.render_to(output)
 

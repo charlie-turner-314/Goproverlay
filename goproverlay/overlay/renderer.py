@@ -12,6 +12,7 @@ from PIL import Image
 
 from ..core.datatypes import Metric
 from ..core.fit_loader import FitData
+from ..core.time_sync import build_video_to_utc_mapper, TimeSyncedFitData
 from ..utils.logging import get_logger
 from .widgets.metric import MetricWidget
 from .widgets.track import TrackWidget
@@ -50,6 +51,8 @@ class OverlayRenderer:
     power_zones: Optional[List[float]] = None
     ftp: Optional[float] = None
     speed_max_kmh: Optional[float] = None
+    gpx_path: Optional[Path] = None
+    power_avg_secs: Optional[float] = None
     # no caching fields
 
     def _build_widgets(
@@ -156,6 +159,9 @@ class OverlayRenderer:
                         theme=theme,
                         font_path=self.font_path,
                         zone_bounds=list(power_zones),
+                        avg_window_s=float(self.power_avg_secs)
+                        if self.power_avg_secs is not None and self.power_avg_secs > 0
+                        else None,
                     )
                 )
             else:
@@ -178,19 +184,75 @@ class OverlayRenderer:
         return widgets
 
     def _frame_with_overlay(self, base_frame: np.ndarray, t: float) -> np.ndarray:
-        # base_frame is HxWx3 RGB array uint8
-        if base_frame.dtype != np.uint8:
-            base_frame = base_frame.astype(np.uint8)
-        base_img = Image.fromarray(base_frame)
-        for w in self._widgets:
-            w.draw_onto(base_img, t)
+        """Draw overlays directly onto the provided RGB frame in-place.
+
+        Avoids numpy↔PIL roundtrips by wrapping the frame's buffer with
+        Image.frombuffer and drawing onto it, returning the original array.
+        """
+        if (
+            base_frame.dtype is not np.uint8
+            or base_frame.ndim != 3
+            or base_frame.shape[2] != 3
+            or not base_frame.flags.c_contiguous
+            or not base_frame.flags.writeable
+        ):
+            base_frame = np.ascontiguousarray(base_frame, dtype=np.uint8)
+
+        h, w = int(base_frame.shape[0]), int(base_frame.shape[1])
+        base_img = Image.frombuffer("RGB", (w, h), base_frame, "raw", "RGB", 0, 1)
+        for wdg in self._widgets:
+            wdg.draw_onto(base_img, t)
+        # Safety: some environments may not reflect in-place edits; return a materialized array
+        # to guarantee overlays are present.
         return np.array(base_img)
 
     def overlay_clip(self, clip):
         """Return a new MoviePy clip with overlays applied to each frame."""
-        self._widgets = self._build_widgets(
-            (clip.w, clip.h), getattr(clip, "duration", None)
+        log.info(
+            "Overlay init: building time mapper for video=%s (duration=%.3fs)",
+            str(self.video_path),
+            float(getattr(clip, "duration", 0.0) or 0.0),
         )
+        # Build a time mapper: prefer in-video GPMF, else GPX, else video metadata
+        mapper, strategy = build_video_to_utc_mapper(self.video_path, self.gpx_path)
+        log.info("Time sync strategy: %s", strategy)
+        if self.fit_data.t0_utc is not None:
+            log.info(
+                "FIT reference t0_utc=%s, offset_seconds=%.3f",
+                self.fit_data.t0_utc.isoformat(),
+                float(self.fit_data.offset_seconds),
+            )
+        # Log sample mappings
+        try:
+            dur = float(getattr(clip, "duration", 0.0) or 0.0)
+            u0 = mapper(0.0)
+            u1 = mapper(dur) if dur > 0 else None
+            log.info(
+                "Time map samples: t=0.000s -> %s; t=%.3fs -> %s",
+                u0.isoformat() if u0 else "None",
+                dur,
+                u1.isoformat() if u1 else "None",
+            )
+        except Exception:
+            pass
+
+        # Wrap FIT data with time-synced adapter
+        synced_fit = TimeSyncedFitData(self.fit_data, mapper)
+
+        # Build widgets with the synced fit. We avoid duration-based filtering in widgets
+        # to prevent mismatches when timelines differ; pass None for duration.
+        log.info("Overlay init: building widgets for metrics=%s", ",".join([m.value for m in self.metrics]))
+        self._widgets = self._build_widgets((clip.w, clip.h), None)
+        # Patch widgets' fit references where applicable
+        patched = 0
+        for w in self._widgets:
+            if hasattr(w, "fit"):
+                try:
+                    w.fit = synced_fit  # type: ignore
+                    patched += 1
+                except Exception:
+                    pass
+        log.info("Overlay init: time-synced FitData injected into %d widgets", patched)
 
         original_get_frame = clip.get_frame
 

@@ -41,6 +41,14 @@ def main():
         default=None,
         help="Functional Threshold Power (W) for power zones",
     )
+    p.add_argument(
+        "--power-avg",
+        dest="power_avg",
+        type=int,
+        default=None,
+        help="Windowed average seconds for power gauge (e.g. 3)",
+    )
+
     args = p.parse_args()
 
     w, h = map(int, args.size.lower().split("x"))
@@ -75,6 +83,7 @@ def main():
         theme="dark",
         font_path=None,
         ftp=args.ftp,
+        power_avg_secs=float(args.power_avg) if args.power_avg else None,
     )
 
     out = renderer.overlay_clip(clip)

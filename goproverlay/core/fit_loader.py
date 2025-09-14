@@ -20,6 +20,8 @@ SEMICIRCLES_TO_DEGREES = 180.0 / 2**31
 class FitData:
     series: SeriesBundle
     offset_seconds: float = 0.0
+    # Absolute reference start for the FIT recording (minimum timestamp in file, UTC)
+    t0_utc: Optional[datetime] = None
 
     @classmethod
     def from_fit_file(
@@ -74,7 +76,7 @@ class FitData:
                     lon.append(float("nan"))
 
         if not timestamps:
-            return cls(series=SeriesBundle(), offset_seconds=offset_seconds)
+            return cls(series=SeriesBundle(), offset_seconds=offset_seconds, t0_utc=None)
 
         t0 = min(timestamps)
         # If align_to_datetime is provided, compute offset_seconds to align FIT to that absolute time.
@@ -118,7 +120,7 @@ class FitData:
             gps_lon.append(float(lo))
         bundle.gps = GpsSeries(gps_t, gps_lat, gps_lon) if gps_t else None
 
-        return cls(series=bundle, offset_seconds=offset_seconds)
+        return cls(series=bundle, offset_seconds=offset_seconds, t0_utc=t0)
 
     def is_empty(self) -> bool:
         s = self.series
